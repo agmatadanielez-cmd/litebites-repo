@@ -910,7 +910,7 @@ if (db.session && user() && !user().plan) ui.screen = 'setup';
    data/users/<uid>/journal/photos/<entryId>
    Entries: { id, at, tag, note, weight, photo }. Authors are stored as ids only; names come from the user capability. */
 const POST_TAGS = ['Progress', 'Meal win', 'Tough day', 'Tip'];
-const community = { status: 'loading', slow: false, db: null, user: null, uid: null, isOwner: false, canWrite: null, feed: [], privateEntries: [], people: {}, photos: {}, posting: false, photoBusy: false };
+const community = { local: false, status: 'loading', slow: false, db: null, user: null, uid: null, isOwner: false, canWrite: null, feed: [], privateEntries: [], people: {}, photos: {}, posting: false, photoBusy: false };
 const PHOTO_RE = /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/;
 const ID_RE = /^[A-Za-z0-9_-]{1,40}$/;
 
@@ -945,6 +945,7 @@ function loadPeople() {
   community.user.profiles(ids).then(ps => { community.people = ps; refreshCommunity(); });
 }
 function ensurePhotos() {
+  if (community.local) return;
   const want = [...community.feed.slice(0, 40), ...community.privateEntries.slice(0, 40)].filter(e => e.photo && !(entryKey(e) in community.photos));
   want.forEach(e => {
     const key = entryKey(e);
@@ -991,7 +992,39 @@ function compressPhoto(file) {
     reader.readAsDataURL(file);
   });
 }
+/* Outside claude.ai there is no shared db, so Community falls back to this device's browser storage. */
+const LOCAL_KEY = 'litebites.community';
+function readLocal() {
+  try { const v = JSON.parse(localStorage.getItem(LOCAL_KEY)); return v && typeof v === 'object' ? v : {}; } catch (e) { return {}; }
+}
+function loadLocal() {
+  const c = community, v = readLocal();
+  c.feed = cleanEntries(v.posts, 'me', 'posts').sort(byNewest);
+  c.privateEntries = cleanEntries(v.journal, 'me', 'private').sort(byNewest);
+  const photos = v.photos && typeof v.photos === 'object' ? v.photos : {};
+  [...c.feed, ...c.privateEntries].forEach(e => {
+    const src = photos[entryKey(e)];
+    if (e.photo) c.photos[entryKey(e)] = typeof src === 'string' && PHOTO_RE.test(src) ? src : 'missing';
+  });
+}
+function writeLocal(mutate) {
+  const v = readLocal();
+  v.posts = Array.isArray(v.posts) ? v.posts : [];
+  v.journal = Array.isArray(v.journal) ? v.journal : [];
+  v.photos = v.photos && typeof v.photos === 'object' ? v.photos : {};
+  mutate(v);
+  try { localStorage.setItem(LOCAL_KEY, JSON.stringify(v)); }
+  catch (e) { const err = new Error('full'); err.code = 'local_full'; throw err; }
+  loadLocal();
+}
 async function saveEntry(entry, photo, share) {
+  if (community.local) {
+    return writeLocal(v => {
+      const list = share ? v.posts : v.journal;
+      list.unshift(entry);
+      if (photo) v.photos[`${share ? 'posts' : 'private'}:me:${entry.id}`] = photo;
+    });
+  }
   const base = entryDoc(share ? 'posts' : 'private', community.uid);
   if (photo) await base.collection('photos').doc(entry.id).set({ src: photo });
   const snap = await base.get();
@@ -1000,6 +1033,13 @@ async function saveEntry(entry, photo, share) {
   if (photo) community.photos[`${share ? 'posts' : 'private'}:${community.uid}:${entry.id}`] = photo;
 }
 async function removeEntry(e) {
+  if (community.local) {
+    return writeLocal(v => {
+      const k = e.scope === 'posts' ? 'posts' : 'journal';
+      v[k] = v[k].filter(x => x && x.id !== e.id);
+      delete v.photos[entryKey(e)];
+    });
+  }
   const base = entryDoc(e.scope, e.author);
   const snap = await base.get();
   const cur = snap.exists && Array.isArray(snap.data().entries) ? snap.data().entries : [];
@@ -1440,6 +1480,7 @@ function communityScreen() {
       <button class="chip${tab === 'all' ? ' on' : ''}" data-act="comm-tab" data-tab="all" role="tab" aria-selected="${tab === 'all'}">Everyone</button>
       <button class="chip${tab === 'mine' ? ' on' : ''}" data-act="comm-tab" data-tab="mine" role="tab" aria-selected="${tab === 'mine'}">My journal</button>
     </div>
+    ${c.local ? '<p class="small muted">Posts are saved on this device only. To see other students’ posts, open LiteBites on claude.ai.</p>' : ''}
     ${canPost ? '<button class="btn primary" data-go="compose">Share an update</button>'
       : c.status === 'ready' ? '<p class="small muted">You can read posts. To share your own, ask the app’s owner for edit access.</p>' : ''}
     ${body}
@@ -1480,7 +1521,7 @@ function compose() {
       <div class="field"><label for="post-note">Your note</label><textarea id="post-note" name="note" maxlength="600" placeholder="What did you cook? What worked, and what was hard?">${esc(d.note)}</textarea></div>
       <div class="field"><label for="post-weight">Weight in kg</label><input id="post-weight" name="weight" type="number" step="0.1" min="25" max="250" inputmode="decimal" placeholder="Optional" value="${esc(d.weight)}"></div>
       <div class="field"><label>Who can see this?</label><div class="seg two" role="radiogroup" aria-label="Who can see this">${radio('share', 'yes', 'Other students', d.share)}${radio('share', 'no', 'Only me', d.share)}</div>
-        <span class="hint">${d.share === 'yes' ? 'Shared posts show your claude.ai name and photo to everyone using this app.' : 'Only you can see this entry, in My journal.'}</span></div>
+        <span class="hint">${c.local ? (d.share === 'yes' ? 'Shows in Everyone on this device. Other students see shared posts only on claude.ai.' : 'Only you can see this entry, in My journal.') : d.share === 'yes' ? 'Shared posts show your claude.ai name and photo to everyone using this app.' : 'Only you can see this entry, in My journal.'}</span></div>
       ${ui.error ? `<p class="error" role="alert">${esc(ui.error)}</p>` : ''}
       <button class="btn primary" type="submit"${c.posting || c.photoBusy ? ' disabled' : ''}>${c.posting ? 'Posting…' : 'Post'}</button>
     </form>
@@ -1736,7 +1777,8 @@ const forms = {
       toast(share ? 'Posted to the community' : 'Saved to your journal');
     } catch (err) {
       c.posting = false;
-      fail(err && err.code === 'quota_exceeded' ? 'The community is out of storage space. Ask the app’s owner to remove old posts.'
+      fail(err && err.code === 'local_full' ? 'This device is out of space for posts. Delete an older post with a photo, then try again.'
+        : err && err.code === 'quota_exceeded' ? 'The community is out of storage space. Ask the app’s owner to remove old posts.'
         : 'Your post couldn’t be saved. Check your connection and try again.');
     }
   },
@@ -1784,7 +1826,10 @@ render();
 // Connect the Community tab to the shared db once the claude.ai viewer answers.
 (async function initCommunity() {
   const c = community;
-  const off = () => { c.status = 'off'; refreshCommunity(); };
+  const off = () => {
+    Object.assign(c, { local: true, uid: 'me', isOwner: true, canWrite: true, status: 'ready' });
+    loadLocal(); refreshCommunity();
+  };
   if (!window.claude || typeof window.claude.use !== 'function') return off();
   const [db, user] = await Promise.all([window.claude.use('db'), window.claude.use('user')]);
   if (!db || !user) return off();
