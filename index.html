@@ -482,7 +482,7 @@ button { font: inherit; color: inherit; }
 /* ---------- bottom nav ---------- */
 .nav {
   flex: none;
-  display: grid; grid-template-columns: repeat(5, 1fr);
+  display: grid; grid-template-columns: repeat(4, 1fr);
   background: var(--nav-bg);
   padding: 10px 10px calc(12px + env(safe-area-inset-bottom, 0px));
   border-radius: 28px 28px 0 0;
@@ -1532,7 +1532,10 @@ const SCREENS = {
   welcome, signup: () => auth('signup'), login: () => auth('login'), setup, assess, result, tracker,
   recipes, recipe: recipeDetail, learn, lesson, community: communityScreen, compose, profile,
 };
-const TABS = ['tracker', 'recipes', 'learn', 'community', 'profile'];
+// Community is switched off while its database is being set up. To bring it back,
+// set COMMUNITY_ON to true and change the nav grid in CSS back to repeat(5, 1fr).
+const COMMUNITY_ON = false;
+const TABS = COMMUNITY_ON ? ['tracker', 'recipes', 'learn', 'community', 'profile'] : ['tracker', 'recipes', 'learn', 'profile'];
 const PUBLIC = ['welcome', 'signup', 'login'];
 
 /* ============ render ============ */
@@ -1563,6 +1566,7 @@ function render() {
 }
 function go(screen, id) {
   ui.pendingDelete = null;
+  if (!COMMUNITY_ON && (screen === 'community' || screen === 'compose')) screen = 'tracker';
   if (screen === 'compose' && !ui.draft) ui.draft = { tag: 'Progress', note: '', weight: '', share: 'yes', photo: null };
   if (screen === 'recipe') ui.recipeBack = ui.screen === 'lesson' ? 'lesson' : 'recipes';
   if (screen === 'lesson' && id) {
