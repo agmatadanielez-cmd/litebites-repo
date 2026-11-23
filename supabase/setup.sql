@@ -38,6 +38,14 @@ $$;
 
 -- 2. Access rules ---------------------------------------------------------
 
+-- Signed-in students may use these tables (the policies below narrow what they see).
+-- Signed-out visitors get no access at all.
+grant usage on schema public to authenticated;
+grant select, insert, delete on public.posts to authenticated;
+grant select, insert, update on public.profiles to authenticated;
+grant select on public.admins to authenticated;
+grant execute on function public.is_admin() to authenticated;
+
 alter table public.profiles enable row level security;
 alter table public.admins enable row level security;
 alter table public.posts enable row level security;
