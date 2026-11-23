@@ -1,6 +1,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>LiteBites</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.50.0/dist/umd/supabase.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Outfit:wght@500;700&family=Plus+Jakarta+Sans:wght@400;600&display=swap">
@@ -482,7 +483,7 @@ button { font: inherit; color: inherit; }
 /* ---------- bottom nav ---------- */
 .nav {
   flex: none;
-  display: grid; grid-template-columns: repeat(4, 1fr);
+  display: grid; grid-template-columns: repeat(5, 1fr);
   background: var(--nav-bg);
   padding: 10px 10px calc(12px + env(safe-area-inset-bottom, 0px));
   border-radius: 28px 28px 0 0;
@@ -910,7 +911,7 @@ if (db.session && user() && !user().plan) ui.screen = 'setup';
    data/users/<uid>/journal/photos/<entryId>
    Entries: { id, at, tag, note, weight, photo }. Authors are stored as ids only; names come from the user capability. */
 const POST_TAGS = ['Progress', 'Meal win', 'Tough day', 'Tip'];
-const community = { local: false, status: 'loading', slow: false, db: null, user: null, uid: null, isOwner: false, canWrite: null, feed: [], privateEntries: [], people: {}, photos: {}, posting: false, photoBusy: false };
+const community = { sb: null, channel: null, authBusy: false, errorDetail: '', local: false, status: 'loading', slow: false, db: null, user: null, uid: null, isOwner: false, canWrite: null, feed: [], privateEntries: [], people: {}, photos: {}, posting: false, photoBusy: false };
 const PHOTO_RE = /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/;
 const ID_RE = /^[A-Za-z0-9_-]{1,40}$/;
 
@@ -945,7 +946,7 @@ function loadPeople() {
   community.user.profiles(ids).then(ps => { community.people = ps; refreshCommunity(); });
 }
 function ensurePhotos() {
-  if (community.local) return;
+  if (community.local || community.sb) return;
   const want = [...community.feed.slice(0, 40), ...community.privateEntries.slice(0, 40)].filter(e => e.photo && !(entryKey(e) in community.photos));
   want.forEach(e => {
     const key = entryKey(e);
@@ -992,6 +993,110 @@ function compressPhoto(file) {
     reader.readAsDataURL(file);
   });
 }
+/* ---- Supabase: the shared Community backend everywhere the library loads ----
+   Tables, access rules and the photo bucket are created by supabase/setup.sql.
+   The publishable key is meant to be public; the access rules protect the data. */
+const SUPABASE_URL = 'https://wtghhykuonxvtfpxzqym.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_l-06iOhLduEG4az9YcDIAQ_RXOeaBYA';
+const PHOTO_BUCKET = 'post-photos';
+
+function newUuid() {
+  if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  b[6] = (b[6] & 15) | 64; b[8] = (b[8] & 63) | 128;
+  const h = [...b].map(x => x.toString(16).padStart(2, '0')).join('');
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+function dataUrlToBlob(url) {
+  const [head, b64] = url.split(',');
+  const bin = atob(b64), bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type: head.slice(5).split(';')[0] });
+}
+function rowToEntry(r) {
+  const w = r.weight == null ? null : Number(r.weight);
+  return {
+    id: String(r.id), at: String(r.created_at), author: String(r.author), scope: r.shared ? 'posts' : 'private',
+    tag: POST_TAGS.includes(r.tag) ? r.tag : 'Progress',
+    note: typeof r.note === 'string' ? r.note.slice(0, 600) : '',
+    weight: Number.isFinite(w) ? w : null,
+    photo: !!r.photo_path, photoPath: r.photo_path || null,
+  };
+}
+let sbReloadTimer = null;
+function sbScheduleReload() { clearTimeout(sbReloadTimer); sbReloadTimer = setTimeout(sbLoad, 300); }
+async function sbLoad() {
+  const c = community;
+  if (!c.uid) return;
+  const { data, error } = await c.sb.from('posts')
+    .select('id, author, created_at, tag, note, weight, shared, photo_path')
+    .order('created_at', { ascending: false }).limit(200);
+  if (error) { c.status = 'error'; c.errorDetail = error.message || ''; return refreshCommunity(); }
+  const rows = data.map(rowToEntry);
+  c.feed = rows.filter(e => e.scope === 'posts');
+  c.privateEntries = rows.filter(e => e.scope === 'private' && e.author === c.uid);
+  c.status = 'ready'; c.errorDetail = '';
+  refreshCommunity();
+  const ids = [...new Set(c.feed.map(e => e.author))].filter(id => !(id in c.people));
+  if (ids.length) {
+    const res = await c.sb.from('profiles').select('id, display_name').in('id', ids);
+    (res.data || []).forEach(p => { c.people[p.id] = { name: p.display_name }; });
+  }
+  const need = rows.filter(e => e.photoPath && !(entryKey(e) in c.photos));
+  if (need.length) {
+    const res = await c.sb.storage.from(PHOTO_BUCKET).createSignedUrls(need.map(e => e.photoPath), 3600);
+    const byPath = {};
+    (res.data || []).forEach(s => { if (s.signedUrl) byPath[s.path] = s.signedUrl; });
+    need.forEach(e => { c.photos[entryKey(e)] = byPath[e.photoPath] || 'missing'; });
+  }
+  refreshCommunity();
+}
+async function sbSession(session) {
+  const c = community;
+  if (!session) {
+    if (c.channel) { c.sb.removeChannel(c.channel); c.channel = null; }
+    Object.assign(c, { uid: null, isOwner: false, status: 'signin', feed: [], privateEntries: [], photos: {} });
+    return refreshCommunity();
+  }
+  if (c.uid === session.user.id && c.status !== 'signin') return;
+  Object.assign(c, { uid: session.user.id, canWrite: true, status: 'loading', me: session.user });
+  refreshCommunity();
+  const adm = await c.sb.from('admins').select('user_id').eq('user_id', c.uid).maybeSingle();
+  c.isOwner = !!(adm && adm.data);
+  const prof = await c.sb.from('profiles').select('display_name').eq('id', c.uid).maybeSingle();
+  if (prof && prof.data) c.people[c.uid] = { name: prof.data.display_name };
+  if (!c.channel) {
+    c.channel = c.sb.channel('litebites-posts')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'posts' }, sbScheduleReload)
+      .subscribe();
+  }
+  await sbLoad();
+}
+async function sbSave(entry, photo, share) {
+  const c = community, id = newUuid();
+  let photo_path = null;
+  if (photo) {
+    photo_path = `${c.uid}/${id}.jpg`;
+    const up = await c.sb.storage.from(PHOTO_BUCKET).upload(photo_path, dataUrlToBlob(photo), { contentType: 'image/jpeg', upsert: false });
+    if (up.error) throw up.error;
+  }
+  const { error } = await c.sb.from('posts').insert({ id, tag: entry.tag, note: entry.note, weight: entry.weight, shared: share, photo_path });
+  if (error) {
+    if (photo_path) c.sb.storage.from(PHOTO_BUCKET).remove([photo_path]);
+    throw error;
+  }
+  if (photo) c.photos[`${share ? 'posts' : 'private'}:${c.uid}:${id}`] = photo;
+  await sbLoad();
+}
+async function sbRemove(e) {
+  const c = community;
+  const { error } = await c.sb.from('posts').delete().eq('id', e.id);
+  if (error) throw error;
+  if (e.photoPath) await c.sb.storage.from(PHOTO_BUCKET).remove([e.photoPath]);
+  delete c.photos[entryKey(e)];
+  await sbLoad();
+}
+
 /* Outside claude.ai there is no shared db, so Community falls back to this device's browser storage. */
 const LOCAL_KEY = 'litebites.community';
 function readLocal() {
@@ -1018,6 +1123,7 @@ function writeLocal(mutate) {
   loadLocal();
 }
 async function saveEntry(entry, photo, share) {
+  if (community.sb) return sbSave(entry, photo, share);
   if (community.local) {
     return writeLocal(v => {
       const list = share ? v.posts : v.journal;
@@ -1033,6 +1139,7 @@ async function saveEntry(entry, photo, share) {
   if (photo) community.photos[`${share ? 'posts' : 'private'}:${community.uid}:${entry.id}`] = photo;
 }
 async function removeEntry(e) {
+  if (community.sb) return sbRemove(e);
   if (community.local) {
     return writeLocal(v => {
       const k = e.scope === 'posts' ? 'posts' : 'journal';
@@ -1460,10 +1567,28 @@ function communityScreen() {
   const tab = ui.commTab || 'all';
   const canPost = c.status === 'ready' && c.uid && c.canWrite !== false;
   let body;
-  if (c.status === 'off') {
+  if (c.status === 'signin') {
+    const up = ui.commAuth === 'up';
+    return `<div class="scroll">
+      ${header('Community')}
+      <p class="muted">Progress photos, notes and stories from students on LiteBites.</p>
+      <div class="panel">
+        <h3>${up ? 'Join the community' : 'Sign in to the community'}</h3>
+        <p class="small muted">${up ? 'Create a community account to share updates and see other students’ posts. Your name is shown on posts you share.' : 'Use your LiteBites community account to read and share posts.'}</p>
+        <form id="comm-auth" class="form">
+          ${up ? `<div class="field"><label for="ca-name">Name other students see</label><input id="ca-name" name="name" maxlength="40" autocomplete="nickname" placeholder="e.g. Danielle R." value="${esc(ui.authName || '')}"></div>` : ''}
+          <div class="field"><label for="ca-email">Email</label><input id="ca-email" name="email" type="email" autocomplete="email" required value="${esc(ui.authEmail || '')}"></div>
+          <div class="field"><label for="ca-pass">Password</label><input id="ca-pass" name="password" type="password" minlength="6" autocomplete="${up ? 'new-password' : 'current-password'}" required></div>
+          ${ui.error ? `<p class="error" role="alert">${esc(ui.error)}</p>` : ''}
+          <button class="btn primary" type="submit"${c.authBusy ? ' disabled' : ''}>${c.authBusy ? 'Please wait…' : up ? 'Create account' : 'Sign in'}</button>
+        </form>
+        <button class="btn soft slim" data-act="comm-auth-mode">${up ? 'I already have an account' : 'New here? Create an account'}</button>
+      </div>
+    </div>`;
+  } else if (c.status === 'off') {
     body = `<div class="panel"><h3>Community isn’t available here</h3><p class="small muted">Open LiteBites in claude.ai while signed in to read and share student posts.</p></div>`;
   } else if (c.status === 'error') {
-    body = `<div class="panel"><h3>Posts couldn’t load</h3><p class="small muted">Check your connection, then open the app again.</p></div>`;
+    body = `<div class="panel"><h3>Posts couldn’t load</h3><p class="small muted">Check your connection, then open the app again.</p>${c.errorDetail ? `<p class="small muted">Details: ${esc(c.errorDetail)}</p>` : ''}</div>`;
   } else if (c.status === 'loading') {
     body = `<p class="muted">${c.slow ? 'Posts are taking a while to load. They’ll appear as soon as the connection catches up.' : 'Loading posts…'}</p>`;
   } else {
@@ -1480,6 +1605,7 @@ function communityScreen() {
       <button class="chip${tab === 'all' ? ' on' : ''}" data-act="comm-tab" data-tab="all" role="tab" aria-selected="${tab === 'all'}">Everyone</button>
       <button class="chip${tab === 'mine' ? ' on' : ''}" data-act="comm-tab" data-tab="mine" role="tab" aria-selected="${tab === 'mine'}">My journal</button>
     </div>
+    ${c.sb && c.uid ? `<p class="small muted">Signed in as <b>${esc((c.people[c.uid] || {}).name || (c.me && c.me.email) || 'you')}</b> · <button class="post-del" data-act="comm-signout">Sign out</button></p>` : ''}
     ${c.local ? '<p class="small muted">Posts are saved on this device only. To see other students’ posts, open LiteBites on claude.ai.</p>' : ''}
     ${canPost ? '<button class="btn primary" data-go="compose">Share an update</button>'
       : c.status === 'ready' ? '<p class="small muted">You can read posts. To share your own, ask the app’s owner for edit access.</p>' : ''}
@@ -1521,7 +1647,7 @@ function compose() {
       <div class="field"><label for="post-note">Your note</label><textarea id="post-note" name="note" maxlength="600" placeholder="What did you cook? What worked, and what was hard?">${esc(d.note)}</textarea></div>
       <div class="field"><label for="post-weight">Weight in kg</label><input id="post-weight" name="weight" type="number" step="0.1" min="25" max="250" inputmode="decimal" placeholder="Optional" value="${esc(d.weight)}"></div>
       <div class="field"><label>Who can see this?</label><div class="seg two" role="radiogroup" aria-label="Who can see this">${radio('share', 'yes', 'Other students', d.share)}${radio('share', 'no', 'Only me', d.share)}</div>
-        <span class="hint">${c.local ? (d.share === 'yes' ? 'Shows in Everyone on this device. Other students see shared posts only on claude.ai.' : 'Only you can see this entry, in My journal.') : d.share === 'yes' ? 'Shared posts show your claude.ai name and photo to everyone using this app.' : 'Only you can see this entry, in My journal.'}</span></div>
+        <span class="hint">${c.sb ? (d.share === 'yes' ? 'Shared posts show your community name to other students.' : 'Only you can see this entry, in My journal.') : c.local ? (d.share === 'yes' ? 'Shows in Everyone on this device. Other students see shared posts only on claude.ai.' : 'Only you can see this entry, in My journal.') : d.share === 'yes' ? 'Shared posts show your claude.ai name and photo to everyone using this app.' : 'Only you can see this entry, in My journal.'}</span></div>
       ${ui.error ? `<p class="error" role="alert">${esc(ui.error)}</p>` : ''}
       <button class="btn primary" type="submit"${c.posting || c.photoBusy ? ' disabled' : ''}>${c.posting ? 'Posting…' : 'Post'}</button>
     </form>
@@ -1534,7 +1660,7 @@ const SCREENS = {
 };
 // Community is switched off while its database is being set up. To bring it back,
 // set COMMUNITY_ON to true and change the nav grid in CSS back to repeat(5, 1fr).
-const COMMUNITY_ON = false;
+const COMMUNITY_ON = true;
 const TABS = COMMUNITY_ON ? ['tracker', 'recipes', 'learn', 'community', 'profile'] : ['tracker', 'recipes', 'learn', 'profile'];
 const PUBLIC = ['welcome', 'signup', 'login'];
 
@@ -1702,6 +1828,8 @@ const actions = {
     catch (err) { toast('That post couldn’t be deleted. Try again.'); }
     render();
   },
+  'comm-auth-mode'() { ui.commAuth = ui.commAuth === 'up' ? 'in' : 'up'; ui.error = ''; render(); },
+  async 'comm-signout'() { try { await community.sb.auth.signOut(); } catch (e) { toast('Couldn’t sign out. Try again.'); } },
   retake() { ui.qIndex = 0; ui.answers = []; go('assess'); },
   logout() { db.session = null; save(); go('welcome'); },
 };
@@ -1762,6 +1890,34 @@ const forms = {
     ui.sheet = null; ui.error = '';
     render();
     loggedToast(u, name, slot);
+  },
+  async 'comm-auth'(f) {
+    const c = community, up = ui.commAuth === 'up';
+    const email = (f.get('email') || '').trim(), password = f.get('password') || '', name = (f.get('name') || '').trim();
+    ui.authEmail = email; ui.authName = name;
+    if (!email || !password) return fail('Enter your email and password.');
+    if (up && !name) return fail('Enter the name other students will see.');
+    if (password.length < 6) return fail('Use a password with at least 6 characters.');
+    c.authBusy = true; ui.error = ''; render();
+    let res;
+    try {
+      res = up
+        ? await c.sb.auth.signUp({ email, password, options: { data: { display_name: name.slice(0, 40) } } })
+        : await c.sb.auth.signInWithPassword({ email, password });
+    } catch (e) { res = { error: { message: 'Couldn’t reach the community server. Check your connection and try again.' } }; }
+    c.authBusy = false;
+    if (res.error) {
+      const m = res.error.message || '';
+      return fail(/invalid login/i.test(m) ? 'That email and password don’t match an account.'
+        : /not confirmed/i.test(m) ? 'Confirm your email first. Open the link we sent you, then sign in.'
+        : /already registered/i.test(m) ? 'That email already has an account. Sign in instead.' : m);
+    }
+    if (up && !res.data.session) {
+      ui.commAuth = 'in'; render();
+      toast('Check your email and open the confirmation link, then sign in.', 6000);
+      return;
+    }
+    render();
   },
   async 'post-form'(f) {
     const c = community, d = ui.draft;
@@ -1834,6 +1990,14 @@ render();
     Object.assign(c, { local: true, uid: 'me', isOwner: true, canWrite: true, status: 'ready' });
     loadLocal(); refreshCommunity();
   };
+  if (window.supabase && typeof window.supabase.createClient === 'function') {
+    try {
+      c.sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+      // Supabase advises against awaiting its own calls inside this callback, so defer.
+      c.sb.auth.onAuthStateChange((_event, session) => setTimeout(() => sbSession(session), 0));
+      return;
+    } catch (e) { c.sb = null; }
+  }
   if (!window.claude || typeof window.claude.use !== 'function') return off();
   const [db, user] = await Promise.all([window.claude.use('db'), window.claude.use('user')]);
   if (!db || !user) return off();
