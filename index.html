@@ -1586,7 +1586,7 @@ function communityScreen() {
       </div>
     </div>`;
   } else if (c.status === 'off') {
-    body = `<div class="panel"><h3>Community isn’t available here</h3><p class="small muted">Open LiteBites in claude.ai while signed in to read and share student posts.</p></div>`;
+    body = `<div class="panel"><h3>Community couldn’t connect</h3><p class="small muted">Check your internet connection, then open the app again.</p></div>`;
   } else if (c.status === 'error') {
     body = `<div class="panel"><h3>Posts couldn’t load</h3><p class="small muted">Check your connection, then open the app again.</p>${c.errorDetail ? `<p class="small muted">Details: ${esc(c.errorDetail)}</p>` : ''}</div>`;
   } else if (c.status === 'loading') {
@@ -1606,9 +1606,9 @@ function communityScreen() {
       <button class="chip${tab === 'mine' ? ' on' : ''}" data-act="comm-tab" data-tab="mine" role="tab" aria-selected="${tab === 'mine'}">My journal</button>
     </div>
     ${c.sb && c.uid ? `<p class="small muted">Signed in as <b>${esc((c.people[c.uid] || {}).name || (c.me && c.me.email) || 'you')}</b> · <button class="post-del" data-act="comm-signout">Sign out</button></p>` : ''}
-    ${c.local ? '<p class="small muted">Posts are saved on this device only. To see other students’ posts, open LiteBites on claude.ai.</p>' : ''}
+    ${c.local ? '<p class="small muted">The community server can’t be reached right now, so new posts are saved on this device only.</p>' : ''}
     ${canPost ? '<button class="btn primary" data-go="compose">Share an update</button>'
-      : c.status === 'ready' ? '<p class="small muted">You can read posts. To share your own, ask the app’s owner for edit access.</p>' : ''}
+      : ''}
     ${body}
   </div>`;
 }
@@ -1647,7 +1647,7 @@ function compose() {
       <div class="field"><label for="post-note">Your note</label><textarea id="post-note" name="note" maxlength="600" placeholder="What did you cook? What worked, and what was hard?">${esc(d.note)}</textarea></div>
       <div class="field"><label for="post-weight">Weight in kg</label><input id="post-weight" name="weight" type="number" step="0.1" min="25" max="250" inputmode="decimal" placeholder="Optional" value="${esc(d.weight)}"></div>
       <div class="field"><label>Who can see this?</label><div class="seg two" role="radiogroup" aria-label="Who can see this">${radio('share', 'yes', 'Other students', d.share)}${radio('share', 'no', 'Only me', d.share)}</div>
-        <span class="hint">${c.sb ? (d.share === 'yes' ? 'Shared posts show your community name to other students.' : 'Only you can see this entry, in My journal.') : c.local ? (d.share === 'yes' ? 'Shows in Everyone on this device. Other students see shared posts only on claude.ai.' : 'Only you can see this entry, in My journal.') : d.share === 'yes' ? 'Shared posts show your claude.ai name and photo to everyone using this app.' : 'Only you can see this entry, in My journal.'}</span></div>
+        <span class="hint">${d.share !== 'yes' ? 'Only you can see this entry, in My journal.' : c.local ? 'Shows in Everyone on this device.' : 'Shared posts show your name to other students.'}</span></div>
       ${ui.error ? `<p class="error" role="alert">${esc(ui.error)}</p>` : ''}
       <button class="btn primary" type="submit"${c.posting || c.photoBusy ? ' disabled' : ''}>${c.posting ? 'Posting…' : 'Post'}</button>
     </form>
